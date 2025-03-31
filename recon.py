@@ -3,6 +3,9 @@ import subprocess
 import argparse
 import json
 from datetime import datetime
+import re
+import socket
+import requests
 
 # Setup argument parser
 parser = argparse.ArgumentParser(description="Automated Network Reconnaissance Toolkit")
@@ -10,9 +13,7 @@ parser.add_argument("-t", "--target", required=True, help="Target IP, subnet, or
 parser.add_argument("-o", "--output", required=True, help="Output file name")
 args = parser.parse_args()
 
-# Create timestamped output directory
-timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-output_dir = f"recon_results/{args.output}_{timestamp}"
+output_dir = f"recon_results/{args.output}"
 os.makedirs(output_dir, exist_ok=True)
 
 def run_command(command, output_file, use_sudo=False):
@@ -38,19 +39,28 @@ def network_discovery(target):
     run_command(f"nmap -sn {target}", f"{output_dir}/live_hosts.txt")
 
 def port_scan(target):
-    """Scan open ports using Nmap."""
-    print("[+] Performing Port Scanning")
+    """Scan open ports using Nmap and return structured results."""
+    print("[+] Performing Port Scanning...")
     
-    # Using fragmented packets, decoys, and a spoofed MAC address
-    nmap_port_scan = f"nmap -T4 -sS {target}"
-    run_command(nmap_port_scan, f"{output_dir}/nmap.txt", use_sudo=True)
+    nmap_output = run_command(f"nmap -T4 -Pn -sS {target}", f"{output_dir}/nmap.txt", use_sudo=True)
+    
+    open_ports = []
+    for line in nmap_output.splitlines():
+        match = re.search(r"(\d+)/tcp\s+(\w+)\s+(\S+)", line)  # Extract port, state, and service
+        if match:
+            port, state, service = match.groups()
+            print(f"[*] Port {port}: {state} ({service})")
+            if state == "open":
+                open_ports.append(int(port))
+
+    return open_ports
+
 
 def service_enum(target):
     """Enumerate running services, SMB, and RPC."""
     print("[+] Performing Service Enumeration...")
     run_command(f"nmap -sV -T4 {target}", f"{output_dir}/service_scan.txt", use_sudo=False)
     run_command(f"enum4linux {target}", f"{output_dir}/smb_enum.txt", use_sudo=True)
-    run_command(f"rpcclient -U '' {target}", f"{output_dir}/rpc_enum.txt", use_sudo=True)
 
 def os_detection(target):
     """Identify OS details."""
@@ -72,13 +82,42 @@ def whois_lookup(target):
     """Perform WHOIS lookup (only for domains)."""
     print("[+] Performing WHOIS Lookup...")
     run_command(f"whois {target}", f"{output_dir}/whois.txt")
+    
+def dig_enum(target):
+    """Perform WHOIS lookup (only for domains)."""
+    print("[+] Performing Dig Lookup...")
+    run_command(f"dig ANY {target}", f"{output_dir}/Dig_ANY.txt")
+    run_command(f"dig ALL {target}", f"{output_dir}/Dig_ALL.txt")
+
+def banner_grab(target):
+    """Perform WHOIS lookup (only for domains)."""
+    print("[+] Grabbing Banners...")
+    run_command(f"nmap -sV --script=banner {target}", f"{output_dir}/Banner_grab.txt")
+    
+def crtsh_lookup(target):
+    """Fetch subdomains using crt.sh."""
+    print("[+] Querying crt.sh for subdomains...")
+    query = f"https://crt.sh/?q={target}&output=json"
+    try:
+        response = requests.get(query, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            subdomains = {entry["name_value"] for entry in data}
+            with open(f"{output_dir}/crtsh.txt", "w") as f:
+                f.write("\n".join(subdomains))
+            print(f"[+] Found {len(subdomains)} subdomains")
+        else:
+            print("[!] crt.sh query failed")
+    except Exception as e:
+        print(f"[X] Error querying crt.sh: {e}")
+
+    
 
 def generate_summary():
     """Generate JSON summary of results."""
     summary = {
         "target": args.target,
         "output_directory": output_dir,
-        "timestamp": timestamp,
         "modules_run": [
             "Network Discovery",
             "Port Scanning with Firewall Evasion",
@@ -100,7 +139,9 @@ service_enum(args.target)
 os_detection(args.target)
 topology_mapping(args.target)
 passive_recon(args.target)
-
+dig_enum(args.target)
+banner_grab(args.target)
+crtsh_lookup(args.target)
 # Only run WHOIS and crt.sh if the target is a domain
 if "." in args.target:
     whois_lookup(args.target)
